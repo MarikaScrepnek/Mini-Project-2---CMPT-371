@@ -34,31 +34,76 @@ def connect():
     else:
         raise RuntimeError("Did not receive SYN-ACK from server")
 
-def send_data(addr, next_seq, data):
+def send_data(addr, next_seq, data, init_cwnd=1024):
+    """
+    Pipelined sending with sliding window, flow control, and AIMD congestion control.
+    """
     seq = next_seq
-    for i in range(0, len(data), CHUNK_SIZE):
-        chunk = data[i:i+CHUNK_SIZE]
+    send_base = seq
+    buffer = {}      # seq -> (packet, length)
+    dup_acks = 0  # seq -> count of duplicate ACKs
+    cwnd = init_cwnd
+    ssthresh = 8192
+    MAX_WAIT = 0.5
+    data_len = len(data)
+    offset = 0
+    rwnd = MAX_BUFFER  # initialize rwnd to max, will update with server ACKs
 
-        pkt = common.packet_pack(seq, 0, 0, MAX_BUFFER, chunk)
-        client_socket.sendto(pkt, addr)
-        print(f"Sent packet seq={seq}")
+    while send_base < next_seq + data_len or buffer:
+        # send as many packets as window allows (cwnd and rwnd)
+        while offset < data_len and sum(length for (_, length) in buffer.values()) < min(cwnd, rwnd):
+            chunk = data[offset:offset+CHUNK_SIZE]
+            pkt = common.packet_pack(seq, 0, 0, MAX_BUFFER, chunk)
+            client_socket.sendto(pkt, addr)
+            buffer[seq] = (pkt, len(chunk))
+            print(f"Sent packet seq={seq}")
+            seq += len(chunk)
+            offset += len(chunk)
 
-        while True:
-            try:
-                pkt_data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
-                srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(pkt_data)
+        # wait for ACKs
+        try:
+            pkt_data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
+            srv_seq, srv_ack, flags, rwnd_new, _ = common.packet_unpack(pkt_data)
 
-                if flags & common.ACK and srv_ack == seq + len(chunk):
-                    print(f"Received ACK for seq={seq}")
-                    seq += len(chunk)
-                    break
-                else:
-                    print(f"Received wrong ACK (ack={srv_ack}), resending")
-                    client_socket.sendto(pkt, addr)
+            if flags & common.ACK:
+                # Duplicate ACK
+                if srv_ack == send_base:
+                    dup_acks += 1
+                    print(f"Duplicate ACK for seq={srv_ack} ({dup_acks}x)")
+                    if dup_acks == 3 and send_base in buffer:
+                        # Fast retransmit: retransmit send_base packet
+                        print(f"Fast retransmit triggered for seq={send_base}")
+                        client_socket.sendto(buffer[send_base][0], addr)
+                        ssthresh = max(cwnd // 2, CHUNK_SIZE)
+                        cwnd = ssthresh
+                        print(f"cwnd reduced to {cwnd}")
+                elif srv_ack > send_base:
+                    # New ACK: slide window
+                    acked_seqs = [s for s in buffer if s + buffer[s][1] <= srv_ack]
+                    for s in acked_seqs:
+                        del buffer[s]
+                    send_base = srv_ack
+                    dup_acks = 0  # reset duplicate ACKs
 
-            except socket.timeout:
-                print("ACK timeout, resending packet")
-                client_socket.sendto(pkt, addr)
+                    # AIMD congestion control
+                    if cwnd < ssthresh:
+                        cwnd += CHUNK_SIZE  # slow start (exponential)
+                    else:
+                        cwnd += max(CHUNK_SIZE * CHUNK_SIZE // cwnd, 1)  # linear
+                    print(f"Received ACK for seq={srv_ack}, cwnd now {cwnd}")
+            rwnd = rwnd_new  # update receiver window
+
+        except socket.timeout:
+            # retransmit oldest unacked packet
+            if buffer:
+                oldest_seq = min(buffer.keys())
+                client_socket.sendto(buffer[oldest_seq][0], addr)
+                print(f"Timeout: retransmitting seq={oldest_seq}")
+                ssthresh = max(cwnd // 2, CHUNK_SIZE)
+                cwnd = CHUNK_SIZE
+                print(f"Timeout → cwnd reset to {cwnd}, ssthresh={ssthresh}")
+                dup_acks = 0
+
     return seq
 
 def send_fin(addr, seq):
