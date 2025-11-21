@@ -34,7 +34,7 @@ def connect():
     else:
         raise RuntimeError("Did not receive SYN-ACK from server")
 
-def send_data(addr, next_seq, data, init_cwnd=1024):
+def send_data(addr, next_seq, data, init_cwnd=1):
     """
     Pipelined sending with sliding window, flow control, and AIMD congestion control.
     """
@@ -42,7 +42,7 @@ def send_data(addr, next_seq, data, init_cwnd=1024):
     send_base = seq
     buffer = {}      # seq -> (packet, length)
     dup_acks = 0  # seq -> count of duplicate ACKs
-    cwnd = init_cwnd
+    cwnd = float(init_cwnd)
     ssthresh = 8192
     MAX_WAIT = 0.5
     data_len = len(data)
@@ -87,9 +87,9 @@ def send_data(addr, next_seq, data, init_cwnd=1024):
 
                     # AIMD congestion control
                     if cwnd < ssthresh:
-                        cwnd += CHUNK_SIZE  # slow start (exponential)
+                        cwnd += CHUNK_SIZE / cwnd # slow start (exponential)
                     else:
-                        cwnd += max(CHUNK_SIZE * CHUNK_SIZE // cwnd, 1)  # linear
+                        cwnd += 1  # linear
                     print(f"Received ACK for seq={srv_ack}, cwnd now {cwnd}")
             rwnd = rwnd_new  # update receiver window
 

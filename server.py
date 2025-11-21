@@ -8,6 +8,7 @@ import common
 # server configuration
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 9000
+
 MAX_INPUT_SIZE = 4096 # maximum number of bytes the server will read from the UDP socket at once
 MAX_BUFFER = 10 * 1024 # size of payload buffer
 PROCESS_RATE = 1024 # bytes per tick (this is used to simulate pipelining / speed of server)
@@ -33,20 +34,19 @@ def accept_connection():
 
             data, addr2 = server_socket.recvfrom(MAX_INPUT_SIZE) # receive packet
             seq2, ack2, flags2, _, _ = common.packet_unpack(data) # unpack the packet
-            if flags2 & ACK: # if this packet is and ACK, connection is established
+            if flags2 & common.ACK: # if this packet is and ACK, connection is established
                 print(f"Connection established with {addr}")
                 return addr, server_seq
 
 
 # receive data / FIN after connection initiated
 def receive_data(addr):
-    expected_seq = 0
+    expected_seq = 1
     buffer = bytearray()
     fin_received = False
-    server_fin_sent = False
 
     while True:
-        new_data = select.select([server_socket], [], [], 0)[0] # non blocking socket
+        new_data = select.select([server_socket], [], [], 0.1)[0] # non blocking socket
         if not fin_received and new_data:
             data, _ = server_socket.recvfrom(MAX_INPUT_SIZE)
             seq, ack, flags, rwnd, payload = common.packet_unpack(data)
@@ -82,34 +82,26 @@ def receive_data(addr):
             buffer = buffer[to_process:]
 
         if fin_received and len(buffer) == 0:
-            if not server_fin_sent:
-                server_fin = common.packet_pack(0, expected_seq, common.FIN, MAX_BUFFER)
-                server_socket.sendto(server_fin, addr)
-                server_fin_sent = True
-                print("Server FIN sent, waiting for client ACK")
+            return expected_seq
 
-            retries = 0
-            max_retries = 5
-            server_socket.settimeout(5)
-            while retries < max_retries:
-                try:
-                    data, _ = server_socket.recvfrom(MAX_INPUT_SIZE)
-                    seq, ack, flags, rwnd, payload = common.packet_unpack(data)
-                    if flags & common.ACK:
-                        print("Connection fully closed")
-                        break
-                except socket.timeout:
-                    retries += 1
-                    print(f"FIN ACK not received, retry {retries}/{max_retries}")
-                    server_fin = common.packet_pack(0, expected_seq, common.FIN, MAX_BUFFER)
-                    server_socket.sendto(server_fin, addr)
-            else:
-                print("FIN ACK not received after max retries, closing connection anyway")
+def close_connection(addr, expected_seq):
+    server_fin = common.packet_pack(0, expected_seq, common.FIN, MAX_BUFFER)
+    server_socket.sendto(server_fin, addr)
+    print("Server FIN sent, waiting for client ACK")
 
-            server_socket.setblocking(False)
-            break
+    server_socket.settimeout(5)
+
+    data, _ = server_socket.recvfrom(MAX_INPUT_SIZE)
+    seq, ack, flags, _, _ = common.packet_unpack(data)
+    if flags & common.ACK and seq == expected_seq+1:
+        print("Connection fully closed")
+        return
+    else:
+        print("FIN ACK not received, closing connection anyway")
+        return
 
 
 if __name__ == "__main__":
     client_addr, server_seq = accept_connection() # first need to initiate connection
-    receive_data(client_addr) # then receive data
+    expected_seq = receive_data(client_addr) # then receive data
+    close_connection(client_addr, expected_seq)
