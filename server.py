@@ -10,6 +10,7 @@ SERVER_PORT = 9000
 
 MAX_INPUT_SIZE = 4096 # maximum number of bytes the server will read from the UDP socket at once
 MAX_BUFFER = 10 * 1024 # size of payload buffer
+
 PROCESS_RATE = 1024 # bytes per tick (this is used to simulate pipelining / speed of server)
 
 # create a UDP socket
@@ -55,7 +56,7 @@ def receive_data(addr):
 
                 # send an ACK for FIN
                 print("Received FIN")
-                fin_ack_packet = common.packet_pack(0, seq+1, common.ACK, MAX_BUFFER - len(buffer))
+                fin_ack_packet = common.packet_pack(0, expected_seq+1, common.ACK, MAX_BUFFER - len(buffer))
                 server_socket.sendto(fin_ack_packet, addr)
 
             # if expected packet arrives
@@ -88,7 +89,8 @@ def receive_data(addr):
 # close connection after receiving a FIN and processing all payloads
 def close_connection(addr, expected_seq):
     # send a FIN
-    server_fin = common.packet_pack(0, expected_seq, common.FIN, MAX_BUFFER)
+    server_fin_seq = expected_seq
+    server_fin = common.packet_pack(expected_seq, 0, common.FIN, MAX_BUFFER)
     server_socket.sendto(server_fin, addr)
     print("Server FIN sent, waiting for client ACK")
 
@@ -100,7 +102,7 @@ def close_connection(addr, expected_seq):
     seq, ack, flags, _, _ = common.packet_unpack(data)
 
     # if ACK for FIN received, close connection
-    if flags & common.ACK and seq == expected_seq:
+    if flags & common.ACK and ack == expected_seq + 1:
         print("Connection fully closed")
         return
     # still close connection if FIN ACK isn't received
