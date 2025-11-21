@@ -30,7 +30,7 @@ def accept_connection():
 
             syn_ack_packet = common.packet_pack(server_seq, seq + 1, common.SYN | common.ACK, MAX_BUFFER) # create a SYN-ACK packet
             server_socket.sendto(syn_ack_packet, addr) # send SYN-ACK packet
-            print(f"Sent SYN-ACK to {addr}, seq={server_seq}, ack={seq+1}")
+            print(f"Sent SYN-ACK to {addr}, ack={seq+1}")
 
             data, addr2 = server_socket.recvfrom(MAX_INPUT_SIZE) # receive packet
             seq2, ack2, flags2, _, _ = common.packet_unpack(data) # unpack the packet
@@ -103,7 +103,8 @@ def close_connection(addr, expected_seq):
 
     # if ACK for FIN received, close connection
     if flags & common.ACK and ack == expected_seq + 1:
-        print("Connection fully closed")
+        print("Received ACK for FIN from client")
+        print("Connection closed (server)")
         return
     # still close connection if FIN ACK isn't received
     else:
