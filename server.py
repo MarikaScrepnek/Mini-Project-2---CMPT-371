@@ -39,7 +39,7 @@ def accept_connection():
 
 # receive data
 def receive_data(addr):
-    expected_seq = 2 # starting sequence number
+    expected_seq = 1 # starting sequence number
     buffer = bytearray() # buffer to hold incoming payloads
     fin_received = False # bool saying if the client's FIN has been received
 
@@ -100,7 +100,7 @@ def close_connection(addr, expected_seq):
     seq, ack, flags, _, _ = common.packet_unpack(data)
 
     # if ACK for FIN received, close connection
-    if flags & common.ACK and seq == expected_seq+1:
+    if flags & common.ACK and seq == expected_seq:
         print("Connection fully closed")
         return
     # still close connection if FIN ACK isn't received

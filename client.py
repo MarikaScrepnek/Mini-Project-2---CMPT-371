@@ -3,51 +3,58 @@ import time
 
 import common
 
+# server configuration
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 9000
-MAX_INPUT_SIZE = 4096
+
+MAX_INPUT_SIZE = 4096 # maximum number of bytes the client will read from the UDP socket at once
 MAX_BUFFER = 10 * 1024
 CHUNK_SIZE = 1024  # bytes per packet
-TIME_WAIT = 2
+TIME_WAIT = 2 # wait time once send final ACK
 
+# create a UDP socket
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 client_socket.settimeout(5)
 
 def connect():
-    seq = 0
-    syn_packet = common.packet_pack(seq, 0, common.SYN, MAX_BUFFER)
+    seq = 0 # set initial sequence number
+
+    # send initial SYN to server
+    syn_packet = common.packet_pack(seq, 0, common.SYN, 0)
     client_socket.sendto(syn_packet, (SERVER_IP, SERVER_PORT))
     print("Sent SYN")
 
+    seq += 1
+
+    # receive server response to SYN
     data, addr = client_socket.recvfrom(MAX_INPUT_SIZE)
     srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
 
-    if (flags & (common.SYN | common.ACK)) == (common.SYN | common.ACK):
+    # if response is a SYN-ACK with correct ack number
+    if (flags & (common.SYN | common.ACK)) == (common.SYN | common.ACK) and srv_ack == seq:
         print("Received SYN-ACK")
 
-        ack_packet = common.packet_pack(seq + 1, srv_seq + 1, common.ACK, MAX_BUFFER)
+        # send ACK for SYN-ACK
+        ack_packet = common.packet_pack(seq, srv_seq + 1, common.ACK, 0)
         client_socket.sendto(ack_packet, addr)
         print("Sent ACK → connection established")
 
-        return addr, srv_seq + 1, seq + 1
+        return addr, seq
     
+    # if didn't receive SYN-ACK abort
     else:
         raise RuntimeError("Did not receive SYN-ACK from server")
 
-def send_data(addr, next_seq, data, init_cwnd=1):
-    """
-    Pipelined sending with sliding window, flow control, and AIMD congestion control.
-    """
-    seq = next_seq
-    send_base = seq
-    buffer = {}      # seq -> (packet, length)
-    dup_acks = 0  # seq -> count of duplicate ACKs
-    cwnd = float(init_cwnd)
-    ssthresh = 8192
-    MAX_WAIT = 0.5
+def send_data(addr, next_seq, data):
+    seq = next_seq # sequence number of next byte to send
+    send_base = seq # sequence number of the oldest unacknowledged bye
+    buffer = {} # keeps track of packets that have been sent but not acknowledged - key is sequence number
+    dup_acks = 0  # counts duplicate acks
+    cwnd = 1.0 # initial cwnd
     data_len = len(data)
-    offset = 0
+    offset = 0 # current position in data payload
     rwnd = MAX_BUFFER  # initialize rwnd to max, will update with server ACKs
+    ssthresh = 8192
 
     while send_base < next_seq + data_len or buffer:
         # send as many packets as window allows (cwnd and rwnd)
@@ -108,29 +115,21 @@ def send_data(addr, next_seq, data, init_cwnd=1):
 
 def send_fin(addr, seq):
     fin_pkt = common.packet_pack(seq, 0, common.FIN, MAX_BUFFER)
-    retries = 0
-    max_retries = 5
+    client_socket.sendto(fin_pkt, addr)
+    print(f"Sent FIN seq={seq}")
 
-    while retries < max_retries:
-        client_socket.sendto(fin_pkt, addr)
-        print(f"Sent FIN seq={seq}")
+    data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
+    srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
 
-        try:
-            data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
-            srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
+    if flags & common.ACK:
+        print("Received ACK for FIN")
+        return True
 
-            if flags & common.ACK:
-                print("Received ACK for FIN")
-                return True
+    else:
+        print("FIN ACK never received → closing anyway")
+        return False
 
-        except socket.timeout:
-            retries += 1
-            print(f"Timeout waiting for FIN-ACK, retry {retries}/{max_retries}")
-
-    print("FIN ACK never received → closing anyway")
-    return False
-
-def close_connection(addr):
+def close_connection(addr, client_seq):
     try:
         data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
     except socket.timeout:
@@ -142,7 +141,7 @@ def close_connection(addr):
     if flags & common.FIN:
         print("Received server FIN")
 
-        ack_pkt = common.packet_pack(0, seq + 1, common.ACK, MAX_BUFFER)
+        ack_pkt = common.packet_pack(client_seq, seq + 1, common.ACK, MAX_BUFFER)
         client_socket.sendto(ack_pkt, addr)
         print("Sent ACK for server FIN")
 
@@ -155,9 +154,9 @@ def close_connection(addr):
 
 
 if __name__ == "__main__":
-    addr, srv_seq, next_seq = connect()
+    addr, next_seq = connect()
 
-    # put data to test sending here (each as seperate message)
+    # put test data here (each component will be sent as seperate message)
     test_data = [
         b"Hello server!",
         b"This is a second message."
@@ -167,4 +166,4 @@ if __name__ == "__main__":
         next_seq = send_data(addr, next_seq, data)
 
     send_fin(addr, next_seq)
-    close_connection(addr)
+    close_connection(addr, next_seq)
