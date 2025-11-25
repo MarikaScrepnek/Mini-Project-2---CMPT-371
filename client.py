@@ -1,7 +1,7 @@
 import socket
 import time
-
 import common
+import random
 
 # server configuration
 SERVER_IP = "127.0.0.1"
@@ -13,39 +13,49 @@ MAX_BUFFER = 10 * 1024
 CHUNK_SIZE = 1024  # bytes per packet
 TIME_WAIT = 2 # wait time once send final ACK
 
+LOSS_RATE = 0.2
+
 # create a UDP socket
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 client_socket.settimeout(5) # set socket to timeout after 5 seconds of waiting
+
+def unreliable_sendto(packet, addr):
+    if random.random() < LOSS_RATE:
+        print(f"Simulated packet loss for packet {packet}")
+        return
+    client_socket.sendto(packet, addr)
 
 def connect():
     seq = 0 # set initial sequence number
 
     # send initial SYN to server
     syn_packet = common.packet_pack(seq, 0, common.SYN, 0)
-    client_socket.sendto(syn_packet, (SERVER_IP, SERVER_PORT))
+    unreliable_sendto(syn_packet, (SERVER_IP, SERVER_PORT))
     print("Sent SYN")
 
     seq += 1
 
-    # receive server response to SYN
-    data, addr = client_socket.recvfrom(MAX_INPUT_SIZE)
-    srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
+    while True: # wait to confirm that we received SYN-ACK from server, with the correct ack number
+        try:
+            # receive server response to SYN
+            data, addr = client_socket.recvfrom(MAX_INPUT_SIZE)
+            srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
+            if (flags & (common.SYN | common.ACK)) == (common.SYN | common.ACK) and srv_ack == seq:
+                break
+        except socket.timeout:
+            print("SYN-ACK not received, resending SYN")
+            unreliable_sendto(syn_packet, (SERVER_IP, SERVER_PORT))
 
     # if response is a SYN-ACK with correct ack number
-    if (flags & (common.SYN | common.ACK)) == (common.SYN | common.ACK) and srv_ack == seq:
-        print("Received SYN-ACK")
+    print("Received SYN-ACK")
 
-        # send ACK for SYN-ACK
-        ack_packet = common.packet_pack(seq, srv_seq + 1, common.ACK, 0)
-        client_socket.sendto(ack_packet, addr)
-        print("Sent ACK → connection established")
+    # send ACK for SYN-ACK
+    ack_packet = common.packet_pack(seq, srv_seq + 1, common.ACK, 0)
+    unreliable_sendto(ack_packet, addr)
+    print("Sent ACK → connection established")
 
-        return addr, seq, srv_seq + 1
+    return addr, seq, srv_seq + 1
     
-    # if didn't receive SYN-ACK abort
-    else:
-        raise RuntimeError("Did not receive SYN-ACK from server")
-
 def send_data(addr, next_seq, ack, data):
     # can modify this to see behavioral changes for congestion control
     init_cwnd = CHUNK_SIZE # 1 MSS
@@ -68,7 +78,7 @@ def send_data(addr, next_seq, ack, data):
         while offset < data_len and sum(length for (_, length) in buffer.values()) < min(cwnd, rwnd):
             chunk = data[offset:offset+CHUNK_SIZE] # grab next chunk of data to send
             pkt = common.packet_pack(seq, ack, 0, MAX_BUFFER, chunk) # create a packet with that chunk *****
-            client_socket.sendto(pkt, addr) # send packet to server
+            unreliable_sendto(pkt, addr) # send packet to server
             buffer[seq] = (pkt, len(chunk)) # add packet to unackowledged packet buffer
             print(f"Sent packet seq={seq}")
             # update variables
@@ -91,7 +101,7 @@ def send_data(addr, next_seq, ack, data):
                     # if the duplicate ack count is 3 and we still have send_base in the unacked buffer to send
                     if dup_acks == 3 and send_base in buffer:
                         print(f"Fast retransmit triggered for seq={send_base}")
-                        client_socket.sendto(buffer[send_base][0], addr) # resend the packet
+                        unreliable_sendto(buffer[send_base][0], addr) # resend the packet
 
                         # congestion control update (loss detected)
                         ssthresh = max(cwnd // 2, CHUNK_SIZE) # set ssthresh to half of cwnd at loss (has to be at least the size of one packet)
@@ -104,7 +114,7 @@ def send_data(addr, next_seq, ack, data):
                     for s in acked_seqs:
                         del buffer[s]
                     send_base = srv_ack
-                    ack = send_base
+                    ack = srv_seq
 
                     dup_acks = 0  # reset duplicate ACKs
 
@@ -122,7 +132,7 @@ def send_data(addr, next_seq, ack, data):
             if buffer:
                 # resend the lowest sequence number packet of unacked packets
                 oldest_seq = min(buffer.keys())
-                client_socket.sendto(buffer[oldest_seq][0], addr)
+                unreliable_sendto(buffer[oldest_seq][0], addr)
                 print(f"Timeout: retransmitting seq={oldest_seq}")
                 
                 # loss, so reset cwnd and set ssthresh to half of cwnd at loss
@@ -136,30 +146,29 @@ def send_data(addr, next_seq, ack, data):
 def close_connection(addr, seq, ack):
     # send a fin packet
     fin_pkt = common.packet_pack(seq, ack, common.FIN, MAX_BUFFER) #***
-    client_socket.sendto(fin_pkt, addr)
+    unreliable_sendto(fin_pkt, addr)
     print(f"Sent FIN seq={seq}")
     seq += 1
 
-    try:
-        # receive data from server
-        data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
-        srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
-        ack = srv_seq + 1
+    while True: # wait to make sure server got our FIN
+        try:
+            # receive data from server
+            data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
+            srv_seq, srv_ack, flags, rwnd, _ = common.packet_unpack(data)
+            ack = srv_seq + 1
 
-        # if its an ACK we received an ACK for our fin
-        if flags & common.ACK:
-            print("Received ACK for FIN")
+            # after sending client FIN, server sends FIN-ACK and server FIN
+            # we only need one to have arrived to assume server got our FIN
+            if flags & common.ACK:
+                print("Received ACK for FIN")
+                break
+            elif flags & common.FIN:
+                print("Did not receive ACK, but received FIN so assume client FIN was delivered")
+                break
 
-    except socket.timeout:
-        print("FIN ACK not received, closing anyway")
-
-        # enter timed wait
-        print(f"Entering TIME-WAIT for {TIME_WAIT} seconds...")
-        time.sleep(TIME_WAIT)
-
-        # shut down
-        print("Connection closed (client)")
-        return
+        except socket.timeout:
+            print("FIN ACK not received, resend client FIN")
+            unreliable_sendto(fin_pkt, addr)
 
     try:
         data, _ = client_socket.recvfrom(MAX_INPUT_SIZE)
@@ -171,12 +180,12 @@ def close_connection(addr, seq, ack):
 
             # send ACK for server FIN
             ack_pkt = common.packet_pack(seq, ack, common.ACK, MAX_BUFFER)
-            client_socket.sendto(ack_pkt, addr)
+            unreliable_sendto(ack_pkt, addr)
             print("Sent ACK for server FIN")
     
     except socket.timeout:
         print("FIN not received, closing anyway")
-
+    
     # enter timed wait
     print(f"Entering TIME-WAIT for {TIME_WAIT} seconds...")
     time.sleep(TIME_WAIT)
