@@ -6,7 +6,6 @@ import random
 # server configuration
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 9000
-
 MAX_INPUT_SIZE = 4096 # maximum number of bytes the client will read from the UDP socket at once
 MAX_BUFFER = 10 * 1024
 
@@ -201,10 +200,13 @@ if __name__ == "__main__":
     addr, next_seq, ack = connect()
 
     # put test data here (each component will be sent as seperate message)
-    test_data = [
-        b"Hello server!",
-        b"This is a second message."
-    ]
+    with open("test.txt", 'r', encoding="utf-8") as f:
+        data = f.read()
+    test_data = [data.encode('ascii', errors="ignore")]
+    # test_data = [
+    #     b"Hello server!",
+    #     b"This is a second message."
+    # ]
 
     # send each test data
     for data in test_data:
